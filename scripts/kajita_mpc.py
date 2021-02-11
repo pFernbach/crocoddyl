@@ -1,10 +1,12 @@
 import numpy as np
+import time
 import pinocchio as pin
 import crocoddyl
 from crocoddyl import ActionModelLQR
 import matplotlib
 #matplotlib.use("Qt4agg")
 import matplotlib.pyplot as plt
+from math import floor
 
 DT = 0.05
 H = 0.83
@@ -16,7 +18,7 @@ class ActionModelCOP(ActionModelLQR):
     state = [cx, cy, dcx, dcy, ddcx, ddcy]
     control = [dddcx, dddcy]
     """
-    def __init__(self, cop_target, weight_control_regularization=1e-6, weight_state_regularization=0, weight_cop=1e3, h=H, g=G, dt=0.05):
+    def __init__(self, cop_target, weight_control_regularization=1e-5, weight_state_regularization=0, weight_cop=1, h=H, g=G, dt=0.05):
         ActionModelLQR.__init__(self, 6, 2)
         # Define transition model matrixes
         Fx = np.identity(6)
@@ -55,7 +57,7 @@ class ActionModelCOP(ActionModelLQR):
         self.Lxu = np.zeros([6, 2])
 
         # linear part of the cost function:
-        self.lx = Pz.transpose() @ cop_target
+        self.lx = (Pz.transpose() @ cop_target) * weight_cop
         self.lu = np.zeros(2)
 
 
@@ -137,26 +139,40 @@ def plotJerk(us):
         ax_sub.yaxis.grid()
         ax_sub.xaxis.grid()
 
-# First double support stance:
-init_ds_cop_target = np.array([0, 0])
-init_ds_model_running = ActionModelCOP(init_ds_cop_target)
-init_ds_model_terminal = ActionModelCOP(init_ds_cop_target, weight_state_regularization=1)
+NUM_STEPS = 6
+DURATION_DS = 0.1
+DURATION_SS = 0.9
+Y_OFFSET = [-0.1, 0.1]
+STEP_LENGHT = 0.1
+n_ds = int(floor(DURATION_DS / DT))
+n_ss = int(floor(DURATION_SS / DT))
+current_x = 0.
+current_t = 0.
 
+running_models = []
+for i in range(NUM_STEPS):
+    model = ActionModelCOP([current_x, Y_OFFSET[i % 2], ])
+    running_models += [model] * (n_ds + n_ss)
+    current_x += STEP_LENGHT
 
+current_x -= STEP_LENGHT
+final_ds_model = ActionModelCOP([current_x, 0.])
+running_models += [final_ds_model] * 20
 # Formulating the optimal control problem
-T = 20  # number of knots
-x0 = np.matrix([0.3, -0.2, 0, 0, 0, 0]).T
-problem = crocoddyl.ShootingProblem(x0, [init_ds_model_running] * T, init_ds_model_terminal)
+
+x0 = np.matrix([0., 0., 0, 0, 0, 0]).T
+problem = crocoddyl.ShootingProblem(x0,running_models, final_ds_model)
 
 
 # Creating the DDP solver for this OC problem, defining a logger
+t_start = time.time()
 ddp = crocoddyl.SolverDDP(problem)
 ddp.setCallbacks([crocoddyl.CallbackLogger(), crocoddyl.CallbackVerbose()])
 
 # Solving it with the DDP algorithm
 ddp.solve()
-
-
+t_tot = time.time() - t_start
+print("computation time of crocoddyl: " +str(t_tot * 1000.) +" ms" )
 # plot :
 plotCoP(ddp.xs)
 plotCOM(ddp.xs)
